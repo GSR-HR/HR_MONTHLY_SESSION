@@ -28,7 +28,8 @@ DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 NOTION_VERSION = "2022-06-28"
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_FALLBACK = "gemini-3.1-flash-lite"  # 503이 계속되면 이쪽으로 넘어감
 
 # 공개 Pages 대응: 담당자 이름을 이니셜로 마스킹
 MASK_PEOPLE = os.environ.get("MASK_PEOPLE", "1") == "1"
@@ -205,34 +206,57 @@ def parse_row(page):
 # ── Gemini 요약 ─────────────────────────────────────────────────────
 client = genai.Client(
     api_key=GEMINI_API_KEY,
-    http_options=types.HttpOptions(timeout=90_000),  # 90초 넘으면 포기
+    http_options=types.HttpOptions(timeout=45_000),  # 45초 넘으면 끊고 재시도
 )
+
+# 503(과부하) / 429(쿼터) / 500은 기다리면 풀린다. 나머지는 재시도해도 소용없다.
+RETRYABLE = ("503", "429", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "Timeout", "Deadline")
+BACKOFF = [2, 6, 15, 30]
+
+
+def _call(model, prompt, schema):
+    resp = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            # 생략하면 기본값이 high라 요약 작업에도 과하게 오래 걸린다
+            thinking_config=types.ThinkingConfig(thinking_level="low"),
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    return json.loads(resp.text)
 
 
 def gemini_json(prompt, schema, label=""):
-    """JSON 강제 출력. 실패 시 2회까지 재시도."""
+    """503/429는 지수 백오프로 재시도하고, 끝내 안 되면 폴백 모델로 넘어간다."""
     last_err = None
-    for attempt in range(2):
-        t0 = time.time()
-        try:
-            resp = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    # 생략하면 기본값이 high라 요약 작업에도 과하게 오래 걸린다
-                    thinking_config=types.ThinkingConfig(thinking_level="low"),
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                ),
-            )
-            print(f"    gemini {label} {time.time() - t0:.1f}s", flush=True)
-            return json.loads(resp.text)
-        except Exception as e:
-            last_err = e
-            print(f"    gemini 재시도 {attempt + 1} ({type(e).__name__}) {time.time() - t0:.1f}s",
-                  file=sys.stderr, flush=True)
-            time.sleep(3)
-    print(f"  ! Gemini 실패: {last_err}", file=sys.stderr, flush=True)
+
+    for model in (GEMINI_MODEL, GEMINI_FALLBACK):
+        for attempt, wait in enumerate(BACKOFF, 1):
+            t0 = time.time()
+            try:
+                out = _call(model, prompt, schema)
+                print(f"    gemini {label} {model} {time.time() - t0:.1f}s", flush=True)
+                return out
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                took = time.time() - t0
+
+                if not any(k in msg for k in RETRYABLE):
+                    print(f"    ! 재시도 불가 오류: {msg[:160]}", file=sys.stderr, flush=True)
+                    return None
+
+                if attempt == len(BACKOFF):
+                    print(f"    {model} 포기 → 다음 모델", file=sys.stderr, flush=True)
+                    break
+
+                print(f"    {model} 재시도 {attempt} ({took:.0f}s) → {wait}s 대기",
+                      file=sys.stderr, flush=True)
+                time.sleep(wait)
+
+    print(f"  ! Gemini 실패: {str(last_err)[:200]}", file=sys.stderr, flush=True)
     return None
 
 
@@ -270,25 +294,34 @@ def summarize_task(row, body_text):
     return [b for b in bullets if b][:3]
 
 
-def make_briefing(bu_label, high_items):
-    if not high_items:
-        return f"{bu_label}에 우선순위 '높음' 안건이 없습니다."
+def make_briefing(bu_label, items):
+    if not items:
+        return f"{bu_label}에 등록된 안건이 없습니다."
 
     listed = "\n".join(
-        f"- {i['title']} (마감 {i['due'] or '미정'}): {i['description']}" for i in high_items
+        f"- [{i['priority'] or '미지정'}] {i['title']} (구분 {i['category']}, 마감 {i['due'] or '미정'})"
+        f"\n  설명: {i['description'] or '없음'}"
+        for i in items
     )
-    prompt = f"""당신은 리테일 기업 인사팀장에게 아침 브리핑을 전달합니다.
-아래는 '{bu_label}'의 우선순위 '높음' 안건 목록입니다.
+    counts = {}
+    for i in items:
+        counts[i["priority"] or "미지정"] = counts.get(i["priority"] or "미지정", 0) + 1
+    dist = ", ".join(f"{k} {v}건" for k, v in counts.items())
+
+    prompt = f"""당신은 리테일 기업 인사팀의 업무 현황판에 들어갈 요약문을 작성합니다.
+아래는 '{bu_label}'에 등록된 안건 전체입니다. (총 {len(items)}건 / {dist})
 
 {listed}
 
 규칙
 - 2~3문장의 한 문단으로 작성
-- 오늘 가장 먼저 챙겨야 할 것이 무엇인지 드러날 것
-- 마감이 임박한 건을 우선 언급
-- 목록을 그대로 나열하지 말고 묶어서 서술
-- 과장하거나 원문에 없는 판단을 덧붙이지 말 것
-- "~입니다" 체로 작성"""
+- 첫 문장에서 전체 안건 수와 우선순위 분포를 밝힐 것
+- 그다음 우선순위가 높거나 마감이 임박한 안건을 제목 그대로 언급할 것
+- 사실을 전달하는 설명체로만 작성 ("~입니다", "~있습니다")
+- 지시하거나 요청하지 말 것 ("~바랍니다", "~부탁드립니다", "~해야 합니다", "~검토하여" 금지)
+- 서로 다른 안건을 한 문장에 억지로 묶지 말 것
+- 원문에 없는 배경, 이유, 안건 간의 연관성을 지어내지 말 것
+- 안건 제목은 임의로 줄이거나 바꾸지 말 것"""
     out = gemini_json(prompt, BRIEF_SCHEMA, label=f"브리핑/{bu_label}")
     return (out or {}).get("briefing", "").strip() or "브리핑 생성에 실패했습니다."
 
@@ -341,15 +374,14 @@ def main():
 
     for label in ["전체"] + bus:
         target = rows if label == "전체" else [r for r in rows if r["bu"] == label]
-        high = [r for r in target if r["priority"] == "높음"]
-        key = "|".join(f"{r['id']}:{r['last_edited_time']}" for r in high)
+        key = "|".join(f"{r['id']}:{r['last_edited_time']}" for r in target)
         brief_keys[label] = key
 
         if cached_brief_keys.get(label) == key and key:
             briefings[label] = None  # 아래에서 직전 값 채움
         else:
-            briefings[label] = make_briefing(label, high)
-            time.sleep(0.6)
+            briefings[label] = make_briefing(label, target)
+            time.sleep(0.3)
 
     # 캐시 적중분은 직전 파일에서 그대로 가져오기
     if any(v is None for v in briefings.values()) and OUT_PATH.exists():
