@@ -31,6 +31,9 @@ NOTION_VERSION = "2022-06-28"
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_FALLBACK = "gemini-3.1-flash-lite"  # 503이 계속되면 이쪽으로 넘어감
 
+# 프롬프트를 고칠 때마다 이 숫자를 1씩 올리면 캐시를 무시하고 전부 새로 만든다
+PROMPT_VERSION = "3"
+
 # 공개 Pages 대응: 담당자 이름을 이니셜로 마스킹
 MASK_PEOPLE = os.environ.get("MASK_PEOPLE", "1") == "1"
 
@@ -284,6 +287,7 @@ def summarize_task(row, body_text):
 - 문장 끝에 마침표 없음
 - "~합니다" 대신 "~함", "~필요" 같은 개조식 어미 사용
 - 원문에 없는 내용을 지어내지 말 것
+- 설명이 제목과 명백히 무관하면 설명을 무시하고 제목과 본문만 근거로 삼을 것
 - 정보가 부족하면 제목과 설명에서 추론 가능한 범위까지만 작성
 
 {source}"""
@@ -308,20 +312,20 @@ def make_briefing(bu_label, items):
         counts[i["priority"] or "미지정"] = counts.get(i["priority"] or "미지정", 0) + 1
     dist = ", ".join(f"{k} {v}건" for k, v in counts.items())
 
-    prompt = f"""당신은 리테일 기업 인사팀의 업무 현황판에 들어갈 요약문을 작성합니다.
+    prompt = f"""당신은 리테일 기업 인사팀의 업무 현황판에 들어갈 한 줄 브리핑을 작성합니다.
 아래는 '{bu_label}'에 등록된 안건 전체입니다. (총 {len(items)}건 / {dist})
 
 {listed}
 
 규칙
-- 2~3문장의 한 문단으로 작성
-- 첫 문장에서 전체 안건 수와 우선순위 분포를 밝힐 것
-- 그다음 우선순위가 높거나 마감이 임박한 안건을 제목 그대로 언급할 것
+- 1~2문장, 총 120자 이내로 짧게 작성
+- 안건이 무엇에 관한 것인지 큰 덩어리로 묶어 말할 것
+- 우선순위가 높거나 마감이 가장 이른 안건 하나만 제목 그대로 짚을 것
+- 안건 제목을 임의로 줄이거나 다른 말로 바꾸지 말 것
+- 설명이 제목과 명백히 무관하면 설명을 무시하고 제목만 근거로 삼을 것
 - 사실을 전달하는 설명체로만 작성 ("~입니다", "~있습니다")
 - 지시하거나 요청하지 말 것 ("~바랍니다", "~부탁드립니다", "~해야 합니다", "~검토하여" 금지)
-- 서로 다른 안건을 한 문장에 억지로 묶지 말 것
-- 원문에 없는 배경, 이유, 안건 간의 연관성을 지어내지 말 것
-- 안건 제목은 임의로 줄이거나 바꾸지 말 것"""
+- 원문에 없는 배경, 이유, 안건 간의 연관성을 지어내지 말 것"""
     out = gemini_json(prompt, BRIEF_SCHEMA, label=f"브리핑/{bu_label}")
     return (out or {}).get("briefing", "").strip() or "브리핑 생성에 실패했습니다."
 
@@ -335,6 +339,10 @@ def load_cache():
         prev = json.loads(OUT_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}, {}
+    if prev.get("_prompt_version") != PROMPT_VERSION:
+        print("프롬프트가 바뀌어 캐시를 버리고 전부 새로 생성합니다", flush=True)
+        return {}, {}
+
     summaries = {
         i["id"]: (i.get("last_edited_time"), i.get("summary", []))
         for i in prev.get("items", [])
@@ -396,6 +404,7 @@ def main():
         "bus": bus,
         "briefings": briefings,
         "_brief_keys": brief_keys,
+        "_prompt_version": PROMPT_VERSION,
         "items": rows,
     }
 
