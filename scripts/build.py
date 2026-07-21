@@ -28,7 +28,7 @@ DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 NOTION_VERSION = "2022-06-28"
-GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 # 공개 Pages 대응: 담당자 이름을 이니셜로 마스킹
 MASK_PEOPLE = os.environ.get("MASK_PEOPLE", "1") == "1"
