@@ -40,9 +40,23 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/data.json
+
           if git diff --staged --quiet; then
             echo "변경 없음"
-          else
-            git commit -m "chore: 브리핑 갱신 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
-            git push
+            exit 0
           fi
+
+          git commit -m "chore: 브리핑 갱신 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
+
+          # 실행 중에 원격이 앞서갔을 수 있으므로 rebase 후 푸시
+          for i in 1 2 3; do
+            if git pull --rebase --autostash origin main && git push origin main; then
+              echo "푸시 완료"
+              exit 0
+            fi
+            echo "푸시 재시도 $i"
+            sleep 5
+          done
+
+          echo "3회 시도 후 실패"
+          exit 1
