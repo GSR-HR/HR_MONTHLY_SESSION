@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>오늘의 브리핑</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <div class="picker">
+      <label class="picker__label" for="bu">사업부(BU)</label>
+      <select id="bu" class="picker__select" aria-label="사업부 선택"></select>
+    </div>
+
+    <div class="meta">
+      <div class="meta__block">
+        <span class="meta__label">기준일자</span>
+        <span class="meta__value" id="baseDate">—</span>
+      </div>
+      <div class="meta__block meta__block--count">
+        <span class="meta__label">안건</span>
+        <span class="meta__value" id="count">0건</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="brief" aria-labelledby="briefTitle">
+    <p class="brief__eyebrow" id="briefTitle">오늘의 브리핑</p>
+    <p class="brief__body" id="briefBody">불러오는 중…</p>
+  </section>
+
+  <table class="board" id="board">
+    <thead>
+      <tr>
+        <th class="col-group">구분</th>
+        <th class="col-title">내용</th>
+        <th class="col-pri">우선순위</th>
+        <th class="col-sum">업무 요약</th>
+      </tr>
+    </thead>
+    <tbody id="boardBody"></tbody>
+  </table>
+
+  <div class="cards" id="cards" aria-hidden="true"></div>
+
+  <p class="empty" id="empty" hidden>해당 사업부에 등록된 안건이 없습니다.</p>
+
+  <footer class="foot">
+    <span id="stamp">—</span>
+    <span class="foot__note">Notion · Gemini 3.5 Flash</span>
+  </footer>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
