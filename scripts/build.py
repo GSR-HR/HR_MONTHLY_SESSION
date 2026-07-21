@@ -203,28 +203,36 @@ def parse_row(page):
 
 
 # ── Gemini 요약 ─────────────────────────────────────────────────────
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options=types.HttpOptions(timeout=90_000),  # 90초 넘으면 포기
+)
 
 
-def gemini_json(prompt, schema):
-    """JSON 강제 출력. 실패 시 3회까지 재시도."""
+def gemini_json(prompt, schema, label=""):
+    """JSON 강제 출력. 실패 시 2회까지 재시도."""
     last_err = None
-    for attempt in range(3):
+    for attempt in range(2):
+        t0 = time.time()
         try:
             resp = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,
+                    # 생략하면 기본값이 high라 요약 작업에도 과하게 오래 걸린다
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
                     response_mime_type="application/json",
                     response_schema=schema,
                 ),
             )
+            print(f"    gemini {label} {time.time() - t0:.1f}s", flush=True)
             return json.loads(resp.text)
-        except Exception as e:  # 쿼터/일시 오류 대응
+        except Exception as e:
             last_err = e
-            time.sleep(2 * (attempt + 1))
-    print(f"  ! Gemini 실패: {last_err}", file=sys.stderr)
+            print(f"    gemini 재시도 {attempt + 1} ({type(e).__name__}) {time.time() - t0:.1f}s",
+                  file=sys.stderr, flush=True)
+            time.sleep(3)
+    print(f"  ! Gemini 실패: {last_err}", file=sys.stderr, flush=True)
     return None
 
 
@@ -255,7 +263,7 @@ def summarize_task(row, body_text):
 - 정보가 부족하면 제목과 설명에서 추론 가능한 범위까지만 작성
 
 {source}"""
-    out = gemini_json(prompt, SUMMARY_SCHEMA)
+    out = gemini_json(prompt, SUMMARY_SCHEMA, label="요약")
     if not out:
         return []
     bullets = [re.sub(r"^[-•·]\s*", "", b).strip() for b in out.get("bullets", [])]
@@ -281,7 +289,7 @@ def make_briefing(bu_label, high_items):
 - 목록을 그대로 나열하지 말고 묶어서 서술
 - 과장하거나 원문에 없는 판단을 덧붙이지 말 것
 - "~입니다" 체로 작성"""
-    out = gemini_json(prompt, BRIEF_SCHEMA)
+    out = gemini_json(prompt, BRIEF_SCHEMA, label=f"브리핑/{bu_label}")
     return (out or {}).get("briefing", "").strip() or "브리핑 생성에 실패했습니다."
 
 
@@ -303,25 +311,26 @@ def load_cache():
 
 def main():
     now = datetime.now(KST)
-    print(f"기준일자 {now:%Y-%m-%d %H:%M} KST")
+    print(f"기준일자 {now:%Y-%m-%d %H:%M} KST", flush=True)
 
     pages = query_database(DATABASE_ID)
     rows = [parse_row(p) for p in pages if not p.get("in_trash")]
-    print(f"노션 {len(rows)}건 수신")
+    print(f"노션 {len(rows)}건 수신", flush=True)
 
     cached_summaries, cached_brief_keys = load_cache()
 
     # 1) 항목별 3줄 요약
-    for row in rows:
+    for idx, row in enumerate(rows, 1):
         cached = cached_summaries.get(row["id"])
         if cached and cached[0] == row["last_edited_time"] and cached[1]:
             row["summary"] = cached[1]
             continue
 
+        print(f"  [{idx}/{len(rows)}] {row['title'][:24]}", flush=True)
         body = "\n".join(fetch_block_text(row["id"]))
+        print(f"    본문 {len(body)}자 수집", flush=True)
         row["summary"] = summarize_task(row, body)
-        print(f"  요약 · {row['title'][:24]}")
-        time.sleep(0.6)  # 무료 티어 RPM 여유
+        time.sleep(0.3)  # 무료 티어 RPM 여유
 
     # 2) 정렬: 우선순위 → 마감일
     rows.sort(key=lambda r: (PRIORITY_ORDER.get(r["priority"], 9), r["due"] or "9999"))
@@ -360,7 +369,7 @@ def main():
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"저장 완료 → {OUT_PATH} ({len(rows)}건, BU {len(bus)}종)")
+    print(f"저장 완료 → {OUT_PATH} ({len(rows)}건, BU {len(bus)}종)", flush=True)
 
 
 if __name__ == "__main__":
